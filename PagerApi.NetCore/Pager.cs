@@ -1,68 +1,118 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Query.Internal;
+using Microsoft.EntityFrameworkCore.Storage;
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Dynamic.Core;
+using System.Linq.Expressions;
+using System.Reflection;
 using System.Threading.Tasks;
 
 namespace PagerApi.NetCore
 {
     public static class Pager
     {
-        public static async Task<Response<IList<T>>> ToListPagedAsync<T>(this IQueryable<T> source)
+        private static readonly FieldInfo QueryCompilerField = typeof(EntityQueryProvider).GetTypeInfo().DeclaredFields.First(x => x.Name == "_queryCompiler");
+        private static readonly TypeInfo QueryCompilerTypeInfo = typeof(QueryCompiler).GetTypeInfo();
+        private static readonly FieldInfo DataBaseField = QueryCompilerTypeInfo.DeclaredFields.Single(x => x.Name == "_database");
+        private static readonly PropertyInfo DatabaseDependenciesField = typeof(Database).GetTypeInfo().DeclaredProperties.Single(x => x.Name == "Dependencies");
+
+        public static async Task<Response<IList<TSource>>> ToListPagedAsync<TSource>(this IQueryable<TSource> source) where TSource : class
         {
-            var response = new Response<IList<T>>
+            var response = new Response<IList<TSource>>
             {
-                Total = source.Count()
+                Total = source.Count(),
+                Result = await Resolve(source).ToListAsync()
             };
-
-            if (System.Web.HttpContext.Current == null)
-            {
-                response.Result = await source.ToListAsync();
-            }
-            else
-            {
-                var ctxOffset = System.Web.HttpContext.Current.Request.Headers.Where(x => x.Key == "offset");
-                var ctxSize = System.Web.HttpContext.Current.Request.Headers.Where(x => x.Key == "size");
-
-                if (ctxOffset != null && ctxOffset.Any() && ctxSize != null && ctxSize.Any())
-                {
-                    response.Result = await source.Skip(int.Parse(ctxOffset.Single().Value)).Take(int.Parse(ctxSize.Single().Value)).ToListAsync();
-                }
-                else
-                {
-                    response.Result = await source.ToListAsync();
-                }
-            }
 
             return response;
         }
 
-        public static Response<IList<T>> ToListPaged<T>(this IQueryable<T> source)
+        public static Response<IList<TSource>> ToListPaged<TSource>(this IQueryable<TSource> source) where TSource : class
         {
-            var response = new Response<IList<T>>
+            var response = new Response<IList<TSource>>
             {
-                Total = source.Count()
+                Total = source.Count(),
+                Result = Resolve(source).ToList()
             };
 
-            if (System.Web.HttpContext.Current == null)
+            return response;
+        }
+
+        public static async Task<Response<IList<TSource>>> ToListPagedAsync<TSource, TKey>(this IQueryable<TSource> source, Expression<Func<TSource, TKey>> orderBy, bool descending = false) where TSource : class
+        {
+            var response = new Response<IList<TSource>>
             {
-                response.Result = source.ToList();
+                Total = source.Count(),
+                Result = await Resolve(source, orderBy, descending).ToListAsync()
+            };
+            
+            return response;
+        }
+
+        public static Response<IList<TSource>> ToListPaged<TSource, TKey>(this IQueryable<TSource> source, Expression<Func<TSource, TKey>> orderBy, bool descending = false) where TSource : class
+        {
+            var response = new Response<IList<TSource>>
+            {
+                Total = source.Count(),
+                Result = Resolve(source, orderBy, descending).ToList()
+            };
+
+            return response;
+        }
+
+
+        private static IQueryable<TSource> Resolve<TSource, TKey>(IQueryable<TSource> source, Expression<Func<TSource, TKey>> orderBy, bool descending = false) where TSource : class
+        {
+            var query = ResolveQuery(source);
+            if(descending)
+            {
+                return query.OrderByDescending(orderBy);
             }
             else
+            {
+                return query.OrderBy(orderBy);
+            }
+        }
+
+
+        private static IQueryable<TSource> Resolve<TSource>(IQueryable<TSource> source) where TSource : class
+        {
+            return ResolveQuery(source);
+        }
+
+        private static IQueryable<TSource> ResolveQuery<TSource>(IQueryable<TSource> source) where TSource : class
+        {
+            var result = source;
+
+            if (System.Web.HttpContext.Current != null)
             {
                 var ctxOffset = System.Web.HttpContext.Current.Request.Headers.Where(x => x.Key == "offset");
                 var ctxSize = System.Web.HttpContext.Current.Request.Headers.Where(x => x.Key == "size");
 
                 if (ctxOffset != null && ctxOffset.Any() && ctxSize != null && ctxSize.Any())
                 {
-                    response.Result = source.Skip(int.Parse(ctxOffset.Single().Value)).Take(int.Parse(ctxSize.Single().Value)).ToList();
-                }
-                else
-                {
-                    response.Result = source.ToList();
+                    result = source.Skip(int.Parse(ctxOffset.Single().Value)).Take(int.Parse(ctxSize.Single().Value));
                 }
             }
 
-            return response;
+            var queryCompiler = (QueryCompiler)QueryCompilerField.GetValue(source.Provider);
+            var database = DataBaseField.GetValue(queryCompiler);
+
+            if (database is RelationalDatabase)
+            {
+                var databaseDependencies = (DatabaseDependencies)DatabaseDependenciesField.GetValue(database);
+                var queryCompilationContext = databaseDependencies.QueryCompilationContextFactory.Create(false);
+                var pk = queryCompilationContext.Model.FindEntityType(typeof(TSource)).FindPrimaryKey().Properties.Select(x => x.Name).FirstOrDefault();
+
+                if(!string.IsNullOrWhiteSpace(pk))
+                {
+                    result = result.OrderBy(pk);
+                }
+            }
+
+            return result;
         }
     }
 }
