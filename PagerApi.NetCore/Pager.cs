@@ -18,29 +18,7 @@ namespace PagerApi.NetCore
         private static readonly FieldInfo DataBaseField = QueryCompilerTypeInfo.DeclaredFields.Single(x => x.Name == "_database");
         private static readonly PropertyInfo DatabaseDependenciesField = typeof(Database).GetTypeInfo().DeclaredProperties.Single(x => x.Name == "Dependencies");
 
-        public static async Task<Response<IList<TSource>>> ToListPagedAsync<TSource>(this IQueryable<TSource> source) where TSource : class
-        {
-            var response = new Response<IList<TSource>>
-            {
-                Total = source.Count(),
-                Result = await Resolve(source).ToListAsync()
-            };
-
-            return response;
-        }
-
-        public static Response<IList<TSource>> ToListPaged<TSource>(this IQueryable<TSource> source) where TSource : class
-        {
-            var response = new Response<IList<TSource>>
-            {
-                Total = source.Count(),
-                Result = Resolve(source).ToList()
-            };
-
-            return response;
-        }
-
-        public static async Task<Response<IList<TSource>>> ToListPagedAsync<TSource, TKey>(this IQueryable<TSource> source, Expression<Func<TSource, TKey>> orderBy, bool descending = false) where TSource : class
+        public static async Task<Response<IList<TSource>>> ToListPagedAsync<TSource>(this IQueryable<TSource> source, Expression<Func<TSource, bool>> orderBy = null, bool descending = false) where TSource : class
         {
             var response = new Response<IList<TSource>>
             {
@@ -51,7 +29,7 @@ namespace PagerApi.NetCore
             return response;
         }
 
-        public static Response<IList<TSource>> ToListPaged<TSource, TKey>(this IQueryable<TSource> source, Expression<Func<TSource, TKey>> orderBy, bool descending = false) where TSource : class
+        public static Response<IList<TSource>> ToListPaged<TSource>(this IQueryable<TSource> source, Expression<Func<TSource, bool>> orderBy = null, bool descending = false) where TSource : class
         {
             var response = new Response<IList<TSource>>
             {
@@ -62,24 +40,44 @@ namespace PagerApi.NetCore
             return response;
         }
 
-
-        private static IQueryable<TSource> Resolve<TSource, TKey>(IQueryable<TSource> source, Expression<Func<TSource, TKey>> orderBy, bool descending = false) where TSource : class
+        private static IQueryable<TSource> Resolve<TSource>(IQueryable<TSource> source, Expression<Func<TSource, bool>> orderBy = null, bool descending = false) where TSource : class
         {
             var query = ResolveQuery(source);
-            if(descending)
+            if (orderBy != null)
             {
-                return query.OrderByDescending(orderBy);
+                if (descending)
+                {
+                    return query.OrderByDescending(orderBy);
+                }
+                else
+                {
+                    return query.OrderBy(orderBy);
+                }
             }
             else
             {
-                return query.OrderBy(orderBy);
+                var queryCompiler = (QueryCompiler)QueryCompilerField.GetValue(source.Provider);
+                var database = DataBaseField.GetValue(queryCompiler);
+
+                if (database is RelationalDatabase)
+                {
+                    var entityType = typeof(TSource);
+                    var databaseDependencies = (DatabaseDependencies)DatabaseDependenciesField.GetValue(database);
+                    var queryCompilationContext = databaseDependencies.QueryCompilationContextFactory.Create(false);
+                    var entity = queryCompilationContext.Model.FindEntityType(entityType);
+
+                    if(entity != null)
+                    {
+                        var pk = entity.FindPrimaryKey().Properties.Select(x => x.Name).FirstOrDefault();
+                        if (!string.IsNullOrWhiteSpace(pk))
+                        {
+                            return query.OrderBy(pk);
+                        }
+                    }
+                }
+
+                return query;
             }
-        }
-
-
-        private static IQueryable<TSource> Resolve<TSource>(IQueryable<TSource> source) where TSource : class
-        {
-            return ResolveQuery(source);
         }
 
         private static IQueryable<TSource> ResolveQuery<TSource>(IQueryable<TSource> source) where TSource : class
@@ -94,21 +92,6 @@ namespace PagerApi.NetCore
                 if (ctxOffset != null && ctxOffset.Any() && ctxSize != null && ctxSize.Any())
                 {
                     result = source.Skip(int.Parse(ctxOffset.Single().Value)).Take(int.Parse(ctxSize.Single().Value));
-                }
-            }
-
-            var queryCompiler = (QueryCompiler)QueryCompilerField.GetValue(source.Provider);
-            var database = DataBaseField.GetValue(queryCompiler);
-
-            if (database is RelationalDatabase)
-            {
-                var databaseDependencies = (DatabaseDependencies)DatabaseDependenciesField.GetValue(database);
-                var queryCompilationContext = databaseDependencies.QueryCompilationContextFactory.Create(false);
-                var pk = queryCompilationContext.Model.FindEntityType(typeof(TSource)).FindPrimaryKey().Properties.Select(x => x.Name).FirstOrDefault();
-
-                if(!string.IsNullOrWhiteSpace(pk))
-                {
-                    result = result.OrderBy(pk);
                 }
             }
 
